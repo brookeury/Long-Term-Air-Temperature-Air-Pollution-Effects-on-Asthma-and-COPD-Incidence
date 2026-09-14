@@ -1,0 +1,703 @@
+
+This file provides code to perform descriptive analyses. This includes creating the Table 1, environmental variable correlation analyses, examining differences in distributions across study centers, and assessment of continuous variable distributions.
+
+
+```{r}
+library(patchwork)
+library(dplyr)
+library(ggplot2)
+library(tableone)
+```
+
+
+#0. Load data
+
+Load datasets that have already been cleaned and include all relevant feature engineering.
+
+u1_df: 
+- df for NAKO baseline
+- complete case for baseline COPD, baseline asthma, covariates, and exposures
+
+u2_df_asthma: 
+- df for the 5-year NAKO Follow-up
+- individuals that did not have asthma at baseline
+- complete case for covariates, incident asthma, and exposures
+
+u2_df_copd: 
+- df for the 5-year NAKO Follow-up
+- individuals that did not have COPD at baseline
+- complete case for covariates, incident COPD, and exposures
+```{r}
+u1_df        <- readRDS("")
+u2_df_asthma <- readRDS("")
+u2_df_copd   <- readRDS("")
+```
+
+
+#1. Creating a table 1
+
+functions
+```{r}
+summary_continuous <- function(df, var_name, var) {
+  
+  # Detect whether df name starts with "u1" or "u2"
+  df_name <- deparse(substitute(df))
+  
+  if (startsWith(df_name, "u1")) {
+    asthma_var <- "u1_d_an_lung_2"
+    copd_var   <- "u1_d_an_lung_1"
+  } else if (startsWith(df_name, "u2")) {
+    asthma_var <- "u2_dt_an_lung_2_fu"
+    copd_var   <- "u2_dt_an_lung_1_fu"
+  } else {
+    stop("Dataframe name must start with 'u1' or 'u2'")
+  }
+  
+  get_mean_sd <- function(x) {
+  m <- mean(x, na.rm = TRUE)
+  iqr <- IQR(x, na.rm = TRUE)
+  sprintf("%.2f (%.2f)", m, iqr)
+  }
+  
+  tibble::tibble(
+    #Variable = paste0(var_name, ", mean (sd) "),
+    Variable = paste0(var_name, ", mean (IQR)"),
+    #Overall  = get_mean_sd(df[[var]]),
+    #Overall   = get_mean_sd(df[[var]]),
+    Asthma   = get_mean_sd(df %>% filter(.data[[asthma_var]] == 1) %>% pull(var)),
+    No_Asthma= get_mean_sd(df %>% filter(.data[[asthma_var]] == 0) %>% pull(var)),
+    COPD     = get_mean_sd(df %>% filter(.data[[copd_var]]   == 1) %>% pull(var)),
+    No_COPD  = get_mean_sd(df %>% filter(.data[[copd_var]]   == 0) %>% pull(var))
+  )
+}
+
+summary_categorical <- function(df, var_name, var) {
+
+  # Detect df name (u1 vs u2)
+  df_name <- deparse(substitute(df))
+
+  if (startsWith(df_name, "u1")) {
+    asthma_var <- "u1_d_an_lung_2"
+    copd_var   <- "u1_d_an_lung_1"
+  } else if (startsWith(df_name, "u2")) {
+    asthma_var <- "u2_dt_an_lung_2_fu"
+    copd_var   <- "u2_dt_an_lung_1_fu"
+  } else {
+    stop("Dataframe name must start with 'u1' or 'u2'")
+  }
+
+  # Get full categories but EXCLUDE NA
+  categories <- names(table(df[[var]], useNA = "no"))
+
+  make_tab <- function(data, var) {
+    vec <- factor(data[[var]], levels = categories)
+    tab <- table(vec)
+    pct <- prop.table(tab) * 100
+    sprintf("%d (%.2f%%)", as.integer(tab), pct)
+  }
+
+  tibble::tibble(
+    Variable  = paste0(var_name, ": ", categories, ", n (%)"),
+    Overall   = make_tab(df, var),
+    Asthma    = make_tab(dplyr::filter(df, .data[[asthma_var]] == 1), var),
+    No_Asthma = make_tab(dplyr::filter(df, .data[[asthma_var]] == 0), var),
+    COPD      = make_tab(dplyr::filter(df, .data[[copd_var]]   == 1), var),
+    No_COPD   = make_tab(dplyr::filter(df, .data[[copd_var]]   == 0), var)
+  )
+}
+```
+
+1.1 create table 1 for baseline
+```{r}
+u1_table1 <- dplyr::bind_rows(
+  summary_continuous(u1_df, "Age", "u1_basist_age"),
+  summary_categorical(u1_df, "Sex", "u1_basist_sex"),
+  summary_categorical(u1_df, "Income below median", "u1_at_ses_inc_median"),
+  summary_categorical(u1_df, "Migration status", "u1_at_ses_mig_status"),
+  summary_categorical(u1_df, "Education", "u1_at_ses_isced11_3level"),
+  summary_categorical(u1_df, "Smoking status", "u1_at_smok_stat_noint"),
+  summary_continuous(u1_df, "BMI", "u1_at_anthro_bmi"),
+  #physical activity with quartiles does not add any information to table 1--all 25%
+  summary_continuous(u1_df, "Physical Activity", "u1_at_gpaq_ptotalday"),
+  summary_categorical(u2_df_asthma, "Asthma", "u1_d_an_lung_2"),
+  summary_categorical(u2_df_asthma, "COPD", "u1_d_an_lung_1"),
+  summary_categorical(u1_df, "Occupational exposure", "u1_d_bb1"),
+  summary_continuous(u1_df, "Mean annual temperature", "u1_gt_t_mean_hmg_g"),
+  summary_continuous(u1_df, "Standard deviation annual temperature", "u1_gt_t_sd_hmg_g"),
+  summary_continuous(u1_df, "O3", "u1_gt_o3_exp_g"),
+  summary_continuous(u1_df, "PM2.5", "u1_gt_pm25_exp_g"),
+  summary_continuous(u1_df, "PM10", "u1_gt_pm10_exp_g"),
+  summary_continuous(u1_df, "NO2", "u1_gt_no2_exp_g"),
+  summary_continuous(u1_df, "NDVI", "u1_gt_ndvi_1000_exp_g_15"),
+  summary_continuous(u1_df, "GISD", "u1_gt_gisd_rki_m"),
+)
+
+write.csv(u1_table1, "", row.names = FALSE)
+```
+
+1.2 create table 1 for 5-year follow-up-asthma
+```{r}
+u2_asthma_table1 <- dplyr::bind_rows(
+  #only need age for follow-up
+  summary_continuous(u2_df_asthma, "Age", "u1_basist_age"),
+  summary_categorical(u2_df_asthma, "Age category", "u1_basist_age_category"),
+  #don't need to have sex for both--limited changes expected
+  summary_categorical(u2_df_asthma, "Sex", "u1_basist_sex"),
+  summary_categorical(u2_df_asthma, "Migration status", "u1_at_ses_mig_status"),
+  summary_categorical(u2_df_asthma, "Education", "u1_at_ses_isced11_3level"),
+  summary_categorical(u2_df_asthma, "Smoking status", "u1_at_smok_stat_noint"),
+  #bmi only for follow-up
+  summary_categorical(u2_df_asthma, "BMI", "u1_at_anthro_bmi_category"),
+  #updated physical activity
+  summary_continuous(u2_df_asthma, "Physical Activity", "u1_at_gpaq_ptotalday"),
+  summary_categorical(u2_df_asthma, "Prevalent Asthma", "u1_d_an_lung_2"),
+  summary_categorical(u2_df_asthma, "Prevalent COPD", "u1_d_an_lung_1"),
+  summary_categorical(u2_df_asthma, "Incident Asthma", "u2_dt_an_lung_2_fu"),
+  summary_categorical(u2_df_asthma, "Incident COPD", "u2_dt_an_lung_1_fu"),
+  summary_categorical(u2_df_asthma, "Occupational exposure", "u1_d_bb1"),
+  summary_continuous(u2_df_asthma, "Mean annual temperature", "u1_gt_t_mean_hmg_g"),
+  summary_continuous(u2_df_asthma, "Mean winter temperature", "u1_gt_t_win_mean_hmg_g"),
+  summary_continuous(u2_df_asthma, "Mean spring temperature", "u1_gt_t_spr_mean_hmg_g"),
+  summary_continuous(u2_df_asthma, "Mean summer temperature", "u1_gt_t_smr_mean_hmg_g"),
+  summary_continuous(u2_df_asthma, "Mean fall temperature", "u1_gt_t_fal_mean_hmg_g"),
+  summary_continuous(u2_df_asthma, "PM2.5", "u1_gt_pm25_exp_g"),
+  summary_continuous(u2_df_asthma, "PM10", "u1_gt_pm10_exp_g"),
+  summary_continuous(u2_df_asthma, "GISD", "u1_gt_gisd_rki_m"),
+  summary_continuous(u2_df_asthma, "NO2", "u1_gt_no2_exp_g"),
+  summary_continuous(u2_df_asthma, "Population Desnity", "u1_gt_pop_d_ink_a_18"),
+  summary_categorical(u2_df_asthma, "Degree of Urbanization", "u1_gt_dgu_eu_m"),
+  summary_categorical(u2_df_asthma, "Study center", "u1_basist_uort_combined")
+)
+
+write.csv(u2_asthma_table1, "", row.names = FALSE)
+```
+
+1.3 create table 1 for 5-year follow-up-COPD
+```{r}
+u2_copd_table1 <- dplyr::bind_rows(
+  # only need age for follow-up
+  summary_continuous(u2_df_copd, "Age", "u1_basist_age"),
+  summary_categorical(u2_df_copd, "Age", "u1_basist_age_category"),
+  # don't need to have sex for both--limited changes expected
+  summary_categorical(u2_df_copd, "Sex", "u1_basist_sex"),
+  summary_categorical(u2_df_copd, "Migration status", "u1_at_ses_mig_status"),
+  summary_categorical(u2_df_copd, "Education", "u1_at_ses_isced11_3level"),
+  summary_categorical(u2_df_copd, "Smoking status", "u1_at_smok_stat_noint"),
+  # bmi only for follow-up
+  summary_categorical(u2_df_copd, "BMI", "u1_at_anthro_bmi_category"),
+  # updated physical activity
+  summary_continuous(u2_df_copd, "Physical Activity", "u1_at_gpaq_ptotalday"),
+  summary_categorical(u2_df_copd, "Prevalent Asthma", "u1_d_an_lung_2"),
+  summary_categorical(u2_df_copd, "Prevalent COPD", "u1_d_an_lung_1"),
+  summary_categorical(u2_df_copd, "Incident Asthma", "u2_dt_an_lung_2_fu"),
+  summary_categorical(u2_df_copd, "Incident COPD", "u2_dt_an_lung_1_fu"),
+  summary_categorical(u2_df_copd, "Occupational exposure", "u1_d_bb1"),
+  summary_continuous(u2_df_copd, "Mean annual temperature", "u1_gt_t_mean_hmg_g"),
+  summary_continuous(u2_df_copd, "Mean winter temperature", "u1_gt_t_win_mean_hmg_g"),
+  summary_continuous(u2_df_copd, "Mean spring temperature", "u1_gt_t_spr_mean_hmg_g"),
+  summary_continuous(u2_df_copd, "Mean summer temperature", "u1_gt_t_smr_mean_hmg_g"),
+  summary_continuous(u2_df_copd, "Mean fall temperature", "u1_gt_t_fal_mean_hmg_g"),
+  summary_continuous(u2_df_copd, "PM2.5", "u1_gt_pm25_exp_g"),
+  summary_continuous(u2_df_copd, "PM10", "u1_gt_pm10_exp_g"),
+  summary_continuous(u2_df_copd, "NO2", "u1_gt_no2_exp_g"),
+  summary_continuous(u2_df_copd, "GISD", "u1_gt_gisd_rki_m"),
+  summary_continuous(u2_df_copd, "Population Desnity", "u1_gt_pop_d_ink_a_18"),
+  summary_categorical(u2_df_copd, "Degree of Urbanization", "u1_gt_dgu_eu_m"),
+  summary_categorical(u2_df_copd, "Study center", "u1_basist_uort_combined")
+)
+
+write.csv(u2_copd_table1, "", row.names = FALSE)
+```
+
+
+
+#2. correlation analyses of environmental variables (Figure S3)
+
+environmental variables of interest
+```{r}
+env_vars <- c( "u1_gt_t_mean_hmg_g", "u1_gt_t_fal_mean_hmg_g", "u1_gt_t_win_mean_hmg_g", "u1_gt_t_spr_mean_hmg_g", "u1_gt_t_smr_mean_hmg_g", "u1_gt_pm25_exp_g", "u1_gt_pm10_exp_g", "u1_gt_no2_exp_g", "u1_gt_gisd_rki_m", "u1_gt_pop_d_ink_a_18")
+
+env_labels <- c("Annual\nTemperature", "Fall\nTemperature", "Winter\nTemperature", "Spring\nTemperature", "Summer\nTemperature", "PM2.5", "PM10", "NO2", "GISD", "Population\nDensity")
+```
+
+histograms to check for normality; mostly normal except GISD and population density
+-> use Spearman
+```{r}
+env_vars <- c(
+  "u1_gt_t_mean_hmg_g",
+  "u1_gt_t_win_mean_hmg_g",
+  "u1_gt_t_fal_mean_hmg_g",
+  "u1_gt_t_spr_mean_hmg_g",
+  "u1_gt_t_smr_mean_hmg_g",
+  "u1_gt_pm25_exp_g",
+  "u1_gt_pm10_exp_g",
+  "u1_gt_no2_exp_g",
+  "u1_gt_gisd_rki_m",
+  "u1_gt_pop_d_ink_a_18"
+)
+
+par(mfrow = c(3, 4))  # 3 rows, 4 columns
+
+for (var in env_vars) {
+  hist(
+    u2_df_asthma[[var]],
+    main = var,
+    xlab = "",
+    col = "lightblue",
+    border = "white"
+  )
+}
+
+par(mfrow = c(1, 1))  # reset plotting layout
+```
+
+function to get correlation matrix
+```{r}
+env <- u2_df_asthma[, c(env_vars)]
+
+# Correlation matrix
+cor_mat <- suppressWarnings(cor(
+  env,
+  use    = "pairwise.complete.obs",
+  method = "spearman"
+))
+
+# R squared matrix
+r2_mat <- cor_mat^2
+```
+
+print correlation matrix
+```{r}
+colnames(cor_mat) <- env_labels
+rownames(cor_mat) <- env_labels
+colnames(r2_mat) <- env_labels
+rownames(r2_mat) <- env_labels
+
+corrplot(
+  cor_mat,
+  method = "color",
+  type = "upper",
+  tl.col = "black",
+  tl.cex = 0.8,
+  tl.srt = 45,
+  addgrid.col = NA,
+  col = colorRampPalette(c(
+    "#08306B","#2171B5","#6BAED6","#C6DBEF","#F7FBFF",
+    "#FFF5F0","#FCBBA1","#FB6A4A","#CB181D","#67000D"
+  ))(200),
+  
+  # add R squared
+  addCoef.col = "black",
+  number.cex = 0.8,
+  number.matrix = round(r2_mat, 2)
+)
+```
+
+
+#3. Radar plots of covariate, outcome, and exposure distributions across study centers (Figure S4)
+
+variables
+```{r}
+age_var <- "u1_basist_age"
+bmi_var <- "u1_at_anthro_bmi_eig"
+sex_var <- "u1_basist_sex"
+popdensity_var <- "u1_gt_pop_d_ink_a_18"
+gisd_var <- "u1_gt_gisd_rki_m"
+
+all_vars <- c(
+  temp_var,
+  pollutant_vars,
+  popdensity_var,
+  gisd_var,
+  age_var,
+  #sex_var, #have to add proportion female as a separate varialble so sex is numeric
+  bmi_var
+)
+
+study_center <- "u1_basist_uort_combined"
+
+labels <- c(
+  "u1_gt_t_mean_hmg_g" = "Temperature",
+  "u1_gt_pm25_exp_g"   = "PM2.5",
+  "u1_gt_pm10_exp_g"   = "PM10",
+  "u1_gt_no2_exp_g"    = "NO2",
+  "u1_gt_gisd_rki_m" = "GISD",
+  "u1_gt_pop_d_ink_a_18" = "Population\nDensity",
+  "copd_incidence" = "COPD",
+  "asthma_incidence" = "Asthma",
+  "u1_at_anthro_bmi_eig" = "BMI",
+  "u1_basist_age" = "Age",
+  "prop_female" = "Percent\nFemale"
+)
+```
+
+```{r}
+df <- u2_df_copd
+
+
+#get all of the variables into one plot
+get_incidence <- function(df, outcome) {
+  df %>%
+    group_by(.data[[study_center]]) %>%
+    summarise(incidence = mean(.data[[outcome]] == 1, na.rm = TRUE) * 100)
+}
+
+env_summary <- df %>%
+  group_by(.data[[study_center]]) %>%
+  summarise(
+    across(all_vars, ~ mean(.x, na.rm = TRUE)),
+    prop_female = mean(u1_basist_sex == 1, na.rm = TRUE) 
+  )
+
+copd_inc <- get_incidence(u2_df_copd, "u2_dt_an_lung_1_fu") %>%
+  rename(copd_incidence = incidence)
+
+asthma_inc <- get_incidence(u2_df_asthma, "u2_dt_an_lung_2_fu") %>%
+  rename(asthma_incidence = incidence)
+
+combined <- env_summary %>%
+  left_join(copd_inc, by = study_center) %>%
+  left_join(asthma_inc, by = study_center)
+
+# Normalize 0–1
+scaled <- combined %>%
+  mutate(across(-all_of(study_center), ~ rescale(.x, to = c(0, 1))))
+
+pretty_df <- scaled %>%
+  rename_with(~ ifelse(!is.na(labels[.x]), labels[.x], .x))
+
+#create plots
+plot_grobs <- list()
+
+centers <- unique(pretty_df[[study_center]])
+
+for (center in centers) {
+  
+  dat <- pretty_df %>%
+    filter(.data[[study_center]] == center) %>%
+    select(-all_of(study_center))
+  
+  radar_dat <- rbind(
+    rep(1, ncol(dat)),
+    rep(0, ncol(dat)),
+    dat
+  )
+  
+  f <- tempfile(fileext = ".png")
+  png(f, width = 900, height = 900, res = 140)
+  par(cex = 1.35)
+  par(mar = c(1.5, 1.5, 4, 1.5))
+  
+  radarchart(
+    radar_dat,
+    axistype = 1,
+    pcol = "steelblue",
+    pfcol = scales::alpha("steelblue", 0.35),
+    plwd = 3,
+    
+    # Grid lines
+    cglcol = "grey50",
+    cglty = 1,
+    cglwd = 1.6,
+    vlcex = 1.4,
+    caxislabels = rep("", 5),
+    title = list(paste(center), cex = 2)
+  )
+  
+  dev.off()
+  
+  img <- readPNG(f)
+  plot_grobs[[center]] <- rasterGrob(img)
+}
+
+# Arrange on a compact grid
+n <- length(plot_grobs)
+ncol <- ceiling(sqrt(n))
+nrow <- ceiling(n / ncol)
+
+grid.arrange(
+  grobs = plot_grobs,
+  ncol = ncol,
+  nrow = nrow,
+  padding = unit(0, "mm")
+)
+
+
+png("", width = 3500, height = 3500, res = 200)
+grid.arrange(
+  grobs = plot_grobs,
+  ncol = ncol,
+  nrow = nrow,
+  padding = unit(0, "mm")
+)
+dev.off()
+
+```
+
+
+#4. Number of individuals at each examination center (Table S1)
+
+examination center-table
+```{r}
+# Summary for u1_year
+u1_summary <- u1_df %>%
+  count(u1_basist_uort) %>%
+  mutate(
+    pct = round(n / sum(n) * 100, 2),
+    u1 = paste0(n, " (", pct, "%)")
+  ) %>%
+  select(center = u1_basist_uort, u1)
+
+# Summary for u2_year
+u2_summary <- u2_df_copd %>%
+  count(u2_basist_uort) %>%
+  mutate(
+    pct = round(n / sum(n) * 100, 2),
+    u2 = paste0(n, " (", pct, "%)")
+  ) %>%
+  select(center = u2_basist_uort, u2)
+
+# Combine into one table with years as rows
+exam_center_summary <- full_join(u1_summary, u2_summary, by = "center") %>%
+  arrange(center)
+
+write_csv(exam_center_summary, file = file.path("")) #save table
+```
+
+examination center-figure
+```{r}
+plot_center_bar <- function(data, var, var_name) {
+  ggplot(data, aes(x = .data[[var]])) +
+    geom_bar(fill = "#4C72B0", color = "white") +
+    coord_flip() +
+    labs(
+      title = var_name,
+      x = "Study Center",
+      y = "Count"
+    ) +
+    theme_minimal(base_size = 8) +
+    theme(
+      plot.title = element_text(size = 10, face = "bold"),
+      axis.title = element_text(size = 6),
+      axis.text  = element_text(size = 5)
+    )
+}
+
+plot <- grid.arrange(
+  plot_center_bar(u1_df, "u1_basist_uort", "Baseline Study Center"),
+  plot_center_bar(u2_df_copd, "u2_basist_uort", "Follow up 1 Study Center"),
+  ncol = 3,
+  nrow = 2
+)
+
+plot
+
+ggsave(
+  filename = file.path(""),plot = plot)
+```
+
+
+#5. Length of follow up time for participants
+
+```{r}
+# Time difference in years
+time_diff_years <- as.numeric(u2_df_asthma$u2_basist_udat - u2_df_asthma$u1_basist_udat) / 365.25
+
+summary(time_diff_years)
+
+# Histogram
+hist(
+  time_diff_years,
+  breaks = 50,
+  main = "Time Between U1 and U2",
+  xlab = "Years",
+  col = "skyblue",
+  border = "white"
+)
+```
+
+
+#6. Explore outliners and distribution shapes for continuous variables
+
+function to create a table1 for continuous variables
+```{r}
+summary_continuous <- function(df, var_label, u1_var) {
+  
+  u1 <- df[[u1_var]]
+  
+  # Compute IQR thresholds
+  Q1 <- quantile(u1, 0.25, na.rm = TRUE)
+  Q3 <- quantile(u1, 0.75, na.rm = TRUE)
+  IQR_val <- IQR(u1, na.rm = TRUE)
+  
+  lower_thr <- Q1 - 1.5 * IQR_val
+  upper_thr <- Q3 + 1.5 * IQR_val
+  
+  # Outliers
+  outliers <- u1[u1 < lower_thr | u1 > upper_thr]
+  
+  tibble::tibble(
+    variable = paste0(var_label, ", mean (sd)"),
+    distribution = sprintf("%.2f (%.2f)", mean(u1, na.rm = TRUE), sd(u1, na.rm = TRUE)),
+    outliers = sprintf("threshold: [%.2f, %.2f], number: %d (%.2f%%) ", lower_thr, upper_thr,
+                             length(outliers), 100 * length(outliers) / length(u1))
+  )
+}
+```
+
+function to create histogram figures for continuous variables
+```{r}
+hist_var <- function(df, var_name, var, bin_width) {
+  ggplot(df, aes(x = .data[[var]])) +
+    geom_histogram(binwidth = bin_width, fill = "#4C72B0", color = "white") +
+    labs(
+      title = paste0(var_name),
+      x = var_name,
+      y = "Count"
+    ) +
+    theme_minimal(base_size = 8) +   # Increase all base text
+    theme(
+      plot.title = element_text(size = 10, face = "bold"),
+      axis.title = element_text(size = 6),
+      axis.text  = element_text(size = 5)
+    )
+}
+```
+
+function to create boxplots for continuous variables
+```{r}
+boxplot_var <- function(data, var_name, var) {
+  ggplot(data, aes(y = .data[[var]])) +
+    geom_boxplot(fill = "#4C72B0", color = "black", outlier.color = "red", size = 0.4) +
+    labs(
+      title = var_name,
+      y = var_name,
+      x = ""
+    ) +
+    coord_flip() +
+    theme_minimal(base_size = 8) +
+    theme(
+      plot.title = element_text(size = 10, face = "bold"),
+      axis.title = element_text(size = 6),
+      axis.text  = element_text(size = 5)
+    )
+}
+```
+
+
+7.1. cohort data continuous variables
+table
+```{r}
+summary_table <- dplyr::bind_rows(
+  summary_continuous(u2_df_copd, "age", "u2_basist_age"),
+  summary_continuous(u2_df_copd, "BMI", "u2_at_anthro_bmi"),
+  summary_continuous(u2_df_copd, "Physical activity per day", "u2_at_gpaq_ptotalday"),
+  summary_continuous(u2_df_copd, "Age of COPD diagnosis", "u2_at_lun_age_copd"),
+  summary_continuous(u2_df_copd, "Age of asthma diagnosis", "u2_at_lun_age_asth")
+)
+
+summary_table
+```
+
+histogram & boxplots
+```{r}
+plot <- grid.arrange(
+  hist_var(u2_df_copd, "age", "u2_basist_age", 5),
+  hist_var(u2_df_copd, "BMI", "u2_at_anthro_bmi", 3),
+  hist_var(u2_df_copd, "Physical activity per day", "u2_at_gpaq_ptotalday", 100),
+  hist_var(u2_df_copd, "Age of COPD diagnosis", "u2_at_lun_age_copd", 3),
+  hist_var(u2_df_copd, "Age of asthma diagnosis", "u2_at_lun_age_asth", 3),
+  ncol = 3,
+  nrow = 3
+)
+
+plot
+
+plot <- grid.arrange(
+  boxplot_var(u2_df_copd, "age", "u2_basist_age"),
+  boxplot_var(u2_df_copd, "BMI", "u2_at_anthro_bmi"),
+  boxplot_var(u2_df_copd, "Physical activity per day", "u2_at_gpaq_ptotalday"),
+  boxplot_var(u2_df_copd, "Age of COPD diagnosis", "u2_at_lun_age_copd"),
+  boxplot_var(u2_df_copd, "Age of asthma diagnosis", "u2_at_lun_age_asth"),
+  ncol = 3,
+  nrow = 5
+)
+
+plot
+
+```
+
+7.2. environmental variables
+```{r}
+plot <- grid.arrange(
+  hist_var(u1_df, "Avg Temp",              "u1_gt_t_mean_hmg_g",        0.25),
+  hist_var(u1_df, "3-year Avg Temp",       "u1_gt_t_mean_hmg_g_3year",  0.25),
+  hist_var(u1_df, "Fall Avg Temp",         "u1_gt_t_fal_mean_hmg_g",    0.25),
+  hist_var(u1_df, "Winter Avg Temp",       "u1_gt_t_win_mean_hmg_g",    0.25),
+  hist_var(u1_df, "Spring Avg Temp",       "u1_gt_t_spr_mean_hmg_g",    0.25),
+  hist_var(u1_df, "Summer Avg Temp",       "u1_gt_t_smr_mean_hmg_g",    0.25),
+  ncol = 3,
+  nrow = 3
+)
+plot
+
+plot <- grid.arrange(
+  hist_var(u1_df, "Temp SD",               "u1_gt_t_sd_hmg_g",          0.25),
+  hist_var(u1_df, "Temp Range",            "u1_gt_t_rng_mean_hmg_g",    0.25),
+  hist_var(u1_df, "Temp Max",              "u1_gt_t_max_hmg_g",         0.25),
+  hist_var(u1_df, "Temp Min",              "u1_gt_t_min_hmg_g",         0.25),
+  hist_var(u1_df, "Heat Days",             "u1_gt_heatd_hmg_g",         1),
+  hist_var(u1_df, "Frost Days",            "u1_gt_frostd_hmg_g",        2),
+  ncol = 3,
+  nrow = 3
+)
+plot
+
+plot <- grid.arrange(
+  hist_var(u1_df, "PM2.5",                 "u1_gt_pm25_exp_g",          1),
+  hist_var(u1_df, "PM10",                  "u1_gt_pm10_exp_g",          1),
+  hist_var(u1_df, "Ozone",                 "u1_gt_o3_exp_g",            3),
+  hist_var(u1_df, "NO2",                   "u1_gt_no2_exp_g",           3),
+  hist_var(u1_df, "Global Radiation",      "u1_gt_rad_dwd_g",           10),
+  hist_var(u1_df, "Avg Humidity",          "u1_gt_rh_mean_hmg_g",       1),
+  hist_var(u1_df, "Humidity SD",           "u1_gt_rh_sd_hmg_g",         0.5),
+  ncol = 3,
+  nrow = 3
+)
+plot
+```
+
+```{r}
+plot <- grid.arrange(
+  boxplot_var(u1_df, "Avg Temp",              "u1_gt_t_mean_hmg_g"),
+  boxplot_var(u1_df, "3-year Avg Temp",       "u1_gt_t_mean_hmg_g_3year"),
+  boxplot_var(u1_df, "Fall Avg Temp",       "u1_gt_t_fal_mean_hmg_g"),
+  boxplot_var(u1_df, "Winter Avg Temp",       "u1_gt_t_win_mean_hmg_g"),
+  boxplot_var(u1_df, "Spring Avg Temp",       "u1_gt_t_spr_mean_hmg_g"),
+  boxplot_var(u1_df, "Summer Avg Temp",       "u1_gt_t_smr_mean_hmg_g"),
+  boxplot_var(u1_df, "Temp SD",               "u1_gt_t_sd_hmg_g"),
+  boxplot_var(u1_df, "Temp Range",            "u1_gt_t_rng_mean_hmg_g"),
+  boxplot_var(u1_df, "Temp Max",              "u1_gt_t_max_hmg_g"),
+  boxplot_var(u1_df, "Temp Min",              "u1_gt_t_min_hmg_g"),
+  boxplot_var(u1_df, "Heat Days",             "u1_gt_heatd_hmg_g"),
+  boxplot_var(u1_df, "Frost Days",            "u1_gt_frostd_hmg_g"),
+  ncol = 3,
+  nrow = 4
+)
+plot
+
+plot <- grid.arrange(
+  boxplot_var(u1_df, "PM2.5",                 "u1_gt_pm25_exp_g"),
+  boxplot_var(u1_df, "PM10",                  "u1_gt_pm10_exp_g"),
+  boxplot_var(u1_df, "Ozone",                 "u1_gt_o3_exp_g"),
+  boxplot_var(u1_df, "NO2",                   "u1_gt_no2_exp_g"),
+  boxplot_var(u1_df, "Global Radiation",      "u1_gt_rad_dwd_g"),
+  boxplot_var(u1_df, "Avg Humidity",          "u1_gt_rh_mean_hmg_g"),
+  boxplot_var(u1_df, "Humidity SD",           "u1_gt_rh_sd_hmg_g"),
+  ncol = 3,
+  nrow = 3
+)
+plot
+```
+
+

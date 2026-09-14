@@ -1,0 +1,455 @@
+
+This file contains all the code to run the sensitivity analyses included in the paper
+
+```{r}
+library(dplyr)
+library(tibble)
+library(future)
+library(future.apply)
+library(ggplot2)
+library(ggsci)
+```
+
+
+# load data
+```{r}
+#complete case datasets used in the main models
+u2_df_asthma <- readRDS("") #5-year follow-up df, excluding those with asthma at baseline
+u2_df_copd   <- readRDS("") #5-year follow-up df, excluding those with COPD at baseline
+
+#expanded covariate complete case datasets
+u2_df_asthma_expcovars   <- readRDS("")
+u2_df_copd_expcovars   <- readRDS("")
+
+#imputed datasets
+u2_df_asthma_imp   <- readRDS("")
+u2_df_copd_imp   <- readRDS("")
+```
+
+
+
+# setting up variables
+
+parallelism
+```{r}
+plan(
+  multisession,
+  workers = max(1, parallel::detectCores() - 1)
+)
+
+options(future.globals.maxSize = 8 * 1024^3)
+```
+
+setting up scenarios
+```{r}
+scenarios <- list(
+  copd_incidence = list(df = u2_df_copd, outcome = "u2_dt_an_lung_1_fu", title = "COPD Incidence"),
+  asthma_incidence = list(df = u2_df_asthma, outcome = "u2_dt_an_lung_2_fu", title = "Asthma Incidence")
+)
+```
+
+setting up variables
+```{r}
+temp_var <- "u1_gt_t_mean_hmg_g"
+winter_var <- "u1_gt_t_win_mean_hmg_g"
+temp_vars <- c("u1_gt_t_mean_hmg_g", "u1_gt_t_win_mean_hmg_g", "u1_gt_t_spr_mean_hmg_g")
+seasons_order <- c("u1_gt_t_fal_mean_hmg_g", "u1_gt_t_win_mean_hmg_g", "u1_gt_t_spr_mean_hmg_g", "u1_gt_t_smr_mean_hmg_g")
+humidity_var <- "u1_gt_rh_mean_hmg_g"
+
+pm_vars <- c("u1_gt_pm25_exp_g", "u1_gt_pm10_exp_g")
+no2_var <-"u1_gt_no2_exp_g"
+pollutant_vars <- c(pm_vars, no2_var)
+
+all_vars <- c(temp_var, "u1_gt_t_win_mean_hmg_g", "u1_gt_t_spr_mean_hmg_g", pollutant_vars)
+
+study_center_var <-"u1_basist_uort_combined"
+covars <- c(
+  "u1_basist_sex",
+  "u1_basist_age",
+  "u1_at_ses_mig_status",
+  "u1_at_smok_stat_noint",
+  "u1_at_ses_isced11_3level",
+  "u1_gt_gisd_rki_m",
+  "u1_gt_pop_d_ink_a_18")
+
+titles <- c(
+  "u1_gt_t_mean_hmg_g" = "Annual Temperature",
+  "u1_gt_t_win_mean_hmg_g" = "Winter Temperature",
+  "u1_gt_t_smr_mean_hmg_g" = "Summer Temperature",
+  "u1_gt_t_fal_mean_hmg_g" = "Fall Temperature",
+  "u1_gt_t_spr_mean_hmg_g" = "Spring Temperature",
+  "u1_gt_pm25_exp_g"   = "PM2.5",
+  "u1_gt_pm10_exp_g"   = "PM10",
+  "u1_gt_no2_exp_g"    = "NO2",
+  "u1_gt_gisd_rki_m" = "GISD",
+  "u1_gt_rh_mean_hmg_g" = "Relative Humidity"
+)
+```
+
+
+
+# Set up the main funciton for adjusted logistic regression with linear term to get ORs
+
+main function - scale factor is IQR
+```{r}
+fit_logistic_adjusted <- function(
+    df,
+    y,
+    x,
+    covars,
+    study_center_random_int = FALSE
+) {
+  
+  # choose scale factor
+  # SD
+  #sd_x <- stats::sd(df[[x]], na.rm = TRUE)
+  #scaled_name <- paste0(x, "_sd")
+  #df[[scaled_name]] <- df[[x]] / sd_x
+  
+  #IQR
+  iqr_x <- stats::IQR(df[[x]], na.rm = TRUE)
+  scaled_name <- paste0(x, "_iqr")
+  df[[scaled_name]] <- df[[x]] / iqr_x
+  
+  fixed_terms <- c(scaled_name, covars)
+  
+  
+  if (study_center_random_int) {
+    fixed_part <- paste(fixed_terms, collapse = " + ")
+    rand_part  <- paste0("(1 | ", study_center_var, ")")
+    
+    form <- as.formula(
+      paste(y, "~", fixed_part, "+", rand_part)
+    )
+    fit <- lme4::glmer(
+      form,
+      data    = df,
+      family  = binomial(),
+      control = lme4::glmerControl(
+        optimizer   = "bobyqa",
+        calc.derivs = FALSE
+      )
+    )
+    
+    summ <- summary(fit)$coefficients
+    
+  } else {
+    form <- reformulate(fixed_terms, response = y)
+    
+    fit <- glm(
+      form,
+      data   = df,
+      family = binomial()
+    )
+    
+    summ <- summary(fit)$coefficients
+  }
+  
+  beta <- summ[scaled_name, "Estimate"]
+  se   <- summ[scaled_name, "Std. Error"]
+  z    <- qnorm(0.975)
+  
+  CI_low  <- beta - z * se
+  CI_high <- beta + z * se
+  p_value <- summ[scaled_name, "Pr(>|z|)"]
+  
+  OR_val <- exp(beta)
+  CI_l   <- exp(CI_low)
+  CI_h   <- exp(CI_high)
+  
+  tibble(
+    exposure = x,
+    OR       = OR_val,
+    CI_low   = CI_l,
+    CI_high  = CI_h,
+    OR_CI    = sprintf("%.3f (%.3f, %.3f)", OR_val, CI_l, CI_h),
+    p_value  = round(p_value, 3)
+  )
+}
+```
+
+
+#1. Main Sensitivity Analysis: testing different covariates, imputation
+- Created for Figure S6 and Table S2
+
+list of different covariates
+```{r}
+all_vars <- c(temp_var, seasons_order, pollutant_vars)
+
+covars_list <- list(
+  baseline = c(
+    "u1_basist_sex",
+    "u1_basist_age",
+    "u1_at_ses_mig_status",
+    "u1_at_smok_stat_noint",
+    "u1_at_ses_isced11_3level"
+  ),
+  GSID = c(
+    "u1_basist_sex",
+    "u1_basist_age",
+    "u1_at_ses_mig_status",
+    "u1_at_smok_stat_noint",
+    "u1_at_ses_isced11_3level",
+    "u1_gt_gisd_rki_m"
+  ),
+  pop_d = c(               
+    "u1_basist_sex",
+    "u2_basist_age",
+    "u1_at_ses_mig_status",
+    "u1_at_smok_stat_noint",
+    "u1_at_ses_isced11_3level",
+    "u1_gt_gisd_rki_m",
+    "u1_gt_pop_d_ink_a_18"
+  ),
+  #same as population density, as the study center will be added as a random intercept
+  main_model = c(
+    "u1_basist_sex",
+    "u1_basist_age",
+    "u1_at_ses_mig_status",
+    "u1_at_smok_stat_noint",
+    "u1_at_ses_isced11_3level",
+    "u1_gt_gisd_rki_m",
+    "u1_gt_pop_d_ink_a_18"
+  ),
+  humidity = c(
+    "u1_basist_sex",
+    "u1_basist_age",
+    "u1_at_ses_mig_status",
+    "u1_at_smok_stat_noint",
+    "u1_at_ses_isced11_3level",
+    "u1_gt_gisd_rki_m",
+    "u1_gt_pop_d_ink_a_18",
+    "u1_gt_rh_mean_hmg_g"
+  ),
+  expanded_covars = c(
+    "u1_basist_sex",
+    "u1_basist_age",
+    "u1_at_ses_mig_status",
+    "u1_at_smok_stat_noint",
+    "u1_at_ses_isced11_3level",
+    "u1_gt_gisd_rki_m",
+    "u1_gt_pop_d_ink_a_18",
+    "u1_at_gpaq_ptotal_quartile",
+    "u1_d_bb1",
+    "u1_at_anthro_bmi_eig"
+  ),
+  imputed = c(
+    "u1_basist_sex",
+    "u1_basist_age",
+    "u1_at_ses_mig_status",
+    "u1_at_smok_stat_noint",
+    "u1_at_ses_isced11_3level",
+    "u1_gt_gisd_rki_m",
+    "u1_gt_pop_d_ink_a_18",
+    "u1_at_gpaq_ptotal_quartile",
+    "u1_d_bb1",
+    "u1_at_anthro_bmi_eig"
+  )
+)
+
+model_order <- c(
+  "baseline",
+  "GSID",
+  "pop_d",
+  "main_model",
+  "humidity",
+  "expanded_covars",
+  "imputed"
+)
+
+model_labels <- c(
+  baseline         = "M1",
+  GSID             = "M2",
+  pop_d            = "M3",
+  main_model       = "M4 (Main Model)",
+  humidity         = "M5",
+  expanded_covars  = "M6",
+  imputed          = "M7"
+)
+```
+
+loop through all models, environmental variables
+```{r}
+adjusted_ors_multiplecovars <- lapply(
+  scenarios,
+  function(s) {
+    
+    # fit models for each covariate set
+    all_models <- lapply(
+      names(covars_list),
+      function(model_name) {
+        
+        covars <- covars_list[[model_name]]
+        
+        future.apply::future_lapply(
+          all_vars,
+          function(x) {
+            
+            # select the right df
+            df_use <- if (model_name == "expanded_covars") {
+              
+              if (s$title == "COPD Incidence") {
+                u2_df_copd_expcovars
+              } else if (s$title == "Asthma Incidence") {
+                u2_df_asthma_expcovars
+              } else {
+                s$df
+              }
+              
+            } else if (model_name == "imputed") {
+              
+              if (s$title == "COPD Incidence") {
+                u2_df_copd_imp
+              } else if (s$title == "Asthma Incidence") {
+                u2_df_asthma_imp
+              } else {
+                s$df
+              }
+              
+            } else {
+              s$df
+            }
+            
+            fit_logistic_adjusted(
+              df     = df_use,
+              y      = s$outcome,
+              x      = x,
+              covars = covars,
+              study_center_random_int = model_name %in% c("main_model","expanded_covars", "imputed", "humidity")
+              
+            )
+          }
+        ) |>
+          dplyr::bind_rows() |>
+          dplyr::mutate(model = model_name)
+      }
+    ) |>
+      dplyr::bind_rows()
+    
+    # plotting
+    plot_df <- all_models |>
+      dplyr::mutate(
+        exposure_pretty = factor(
+          titles[exposure],
+          levels = titles[all_vars] 
+        ),
+        model = factor(
+          model,
+          levels = names(model_labels),
+          labels = model_labels
+        )
+      )
+    
+    plt <- ggplot(
+      plot_df,
+      aes(
+        x     = exposure_pretty,
+        y     = OR,
+        color = model,
+        group = model
+      )
+    ) +
+      geom_hline(yintercept = 1, linetype = "dashed", color = "gray50") +
+      geom_point(
+        position = position_dodge(width = 0.5),
+        size = 3,
+        shape = 16
+      ) +
+      geom_errorbar(
+        aes(
+          ymin = CI_low,
+          ymax = CI_high,
+          linewidth = model == "Main Model\n(Study Center)"
+        ),
+        position = position_dodge(width = 0.5),
+        width = 0.42
+      ) +
+      scale_linewidth_manual(
+        values = c(`TRUE` = 1.5, `FALSE` = 0.8),
+        guide = "none"
+      ) +
+      scale_y_log10() +
+      scale_color_jama(name = "Model") +
+      guides(
+        color = guide_legend(
+          keyheight = grid::unit(1.1, "cm"),
+          keywidth  = grid::unit(0.8, "cm"),
+          label.hjust = 0
+        )
+      ) +
+      labs(
+        title = s$title,
+        x = "",
+        y = "Odds Ratio"
+      ) +
+      theme_minimal(base_size = 20) +
+      theme(
+        #legend.position = "right",
+        legend.position = "none",
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title = element_text(face = "bold"),
+        panel.grid.minor = element_blank(),
+        panel.grid.major = element_blank(),
+        axis.line.y = element_line(color = "gray50", linewidth = 0.7),
+        axis.line.x = element_line(color = "gray50", linewidth = 0.7),
+        axis.ticks = element_line(color = "gray50", linewidth = 0.7),
+        axis.ticks.length = unit(3, "pt")
+      )
+    
+    
+    list(
+      or_table = all_models,
+      plot_df  = plot_df,
+      plot     = plt
+    )
+  }
+)
+
+# preserve scenario names
+names(adjusted_ors_multiplecovars) <- names(scenarios)
+```
+
+print
+```{r}
+adjusted_ors_multiplecovars$asthma_incidence$plot
+adjusted_ors_multiplecovars$copd_incidence$plot
+
+asthma_ors <- adjusted_ors_multiplecovars$asthma_incidence$or_table
+copd_ors <- adjusted_ors_multiplecovars$copd_incidence$or_table
+```
+
+save figures as PNGs
+```{r}
+ggsave(
+  "",
+  plot = adjusted_ors_multiplecovars$asthma_incidence$plot,
+  width = 10,
+  height = 6,
+  dpi = 1200
+)
+
+ggsave(
+  "",
+  plot = adjusted_ors_multiplecovars$copd_incidence$plot,
+  width = 10,
+  height = 6,
+  dpi = 1200
+)
+```
+
+
+save dfs as csvs
+```{r}
+write.csv(
+  adjusted_ors_multiplecovars$asthma_incidence$or_table,
+  "asthma_ors.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  adjusted_ors_multiplecovars$copd_incidence$or_table,
+  "copd_ors.csv",
+  row.names = FALSE
+)
+```
+

@@ -1,0 +1,451 @@
+
+This file is used to examine missingness paterns and impute missing data.
+
+```{r}
+library(randomForest)
+library(missForest)
+library(doParallel)
+library(foreach)
+library(dplyr)
+library(purrr)
+library(stringr)
+```
+
+
+#1. Load data
+```{r}
+u1_df        <- readRDS("") #baseline df
+u2_df_asthma <- readRDS("") #5-year follow-up df, excluding those with asthma at baseline
+u2_df_copd   <- readRDS("") #5-year follow-up df, excluding those with COPD at baseline
+```
+
+
+#2. Check missing at random for variables we want to impute
+
+get the number of missing for each variable
+```{r}
+pct_missing <- function(df, vars) {
+  round(
+    sapply(vars, function(v) {
+      if (!v %in% names(df)) {
+        return(NA_real_)   # variable not present
+      }
+      mean(is.na(df[[v]])) * 100
+    }),
+    2
+  )
+}
+
+vars <- c("u1_at_ses_mig_status","u1_at_smok_stat_noint","u1_at_ses_isced11_level","u1_at_ses_inc","u1_d_bb1","u1_gt_inc_hh_ink_d","u1_gt_gisd_rki_m","u1_gt_dgu_eu_m","u1_gt_pop_d_ink_a_18","u1_gt_ndvi_300_exp_g_15","u1_at_anthro_bmi_eig","u2_at_anthro_bmi_eig","u1_at_gpaq_ptotal_quartile","u2_at_gpaq_ptotal_quartile","u2_dt_an_lung_1_fu","u2_dt_an_lung_2_fu","u1_d_an_lung_2","u1_d_an_lung_1")
+
+missing_table <- data.frame(
+  variable = vars,
+  u1_df = pct_missing(u1_df, vars),
+  u2_df_asthma   = pct_missing(u2_df_asthma, vars),
+  u2_df_copd     = pct_missing(u2_df_copd, vars),
+  row.names = NULL
+)
+```
+
+heatmap of missingness
+- some correlated missings between income, occupational exposure, smoking, and education
+```{r}
+#Plot missing pattern: 
+pattern <- u1_df[, c("u1_at_ses_mig_status","u1_at_smok_stat_noint","u1_at_ses_isced11_level","u1_at_ses_inc","u1_d_bb1","u1_gt_inc_hh_ink_d","u1_gt_gisd_rki_m","u1_gt_dgu_eu_m","u1_gt_pop_d_ink_a_18","u1_gt_ndvi_300_exp_g_15","u1_at_anthro_bmi_eig","u1_at_gpaq_ptotal_quartile", "u1_basist_age", "u1_basist_sex", "u1_basist_uort", "u1_d_an_lung_2", "u1_d_an_lung_1")]
+
+colnames(pattern) <- c("migration", "smoking", "education", "income", "occupational exposure", "household income", "GISD", "urbanization", "pop density", "NDVI", "BMI", "physical activity", "age", "sex","study center", "asthma", "COPD")
+
+#create "heatmap" with missings
+ggplot2::ggsave(
+  "",
+  plot = plot_pattern(pattern, rotate = TRUE),
+  width = 14,
+  height = 10,
+  dpi = 150
+)
+```
+
+helper methods to use visualizations to look for missing at random
+```{r}
+u1_missingness_plots <- function(data, var_name, lim) {
+  
+  # Create missingness indicator
+  data$missing_flag <- ifelse(is.na(data[[var_name]]), "Missing", "Not missing")
+  
+  # Helper function to build each plot
+  plot_missing <- function(xvar, title, xlab) {
+    ggplot(data, aes(x = .data[[xvar]], fill = missing_flag)) +
+      geom_bar(position = "fill") +
+      scale_y_continuous(labels = percent) +
+      coord_cartesian(ylim = c(lim, 1)) + 
+      labs(
+        title = NULL,
+        x = xlab,
+        y = NULL
+      ) +
+      theme(
+        plot.title = element_text(size = 6),
+        axis.title = element_text(size = 6),
+        axis.text.x  = element_text(size = 6),
+        axis.text.y  = element_text(size = 6),
+        legend.position = "none"
+      )
+  }
+  
+  # Return all 5 plots
+  list(
+    age   = plot_missing("u1_basist_age",  "Missingness", "Age"),
+    sex   = plot_missing("u1_basist_sex",  "Missingness", "Sex"),
+    uort  = plot_missing("u1_basist_uort", "Missingness", "Study Center"),
+    lung2 = plot_missing("u1_d_an_lung_2", "Missingness", "Asthma"),
+    lung1 = plot_missing("u1_d_an_lung_1", "Missingness", "COPD")
+  )
+}
+
+u2_missingness_plots <- function(data, var_name, lim) {
+  
+  # Create missingness indicator
+  data$missing_flag <- ifelse(is.na(data[[var_name]]), "Missing", "Not missing")
+  
+  # Helper function to build each plot
+  plot_missing <- function(xvar, title, xlab) {
+    ggplot(data, aes(x = .data[[xvar]], fill = missing_flag)) +
+      geom_bar(position = "fill") +
+      scale_y_continuous(labels = percent) +
+      coord_cartesian(ylim = c(lim, 1)) + 
+      labs(
+        title = NULL,
+        x = xlab,
+        y = NULL
+      ) +
+      theme(
+        plot.title = element_text(size = 6),
+        axis.title = element_text(size = 6),
+        axis.text.x  = element_text(size = 6),
+        axis.text.y  = element_text(size = 6),
+        legend.position = "none"
+      )
+  }
+  
+  # Return all 5 plots
+  list(
+    age   = plot_missing("u1_basist_age",  "Missingness", "Age"),
+    sex   = plot_missing("u1_basist_sex",  "Missingness", "Sex"),
+    uort  = plot_missing("u1_basist_uort", "Missingness", "Study Center"),
+    lung2 = plot_missing("u2_dt_an_lung_2_fu", "Missingness", "Asthma"),
+    lung1 = plot_missing("u2_dt_an_lung_1_fu", "Missingness", "COPD")
+  )
+}
+```
+
+looking for missing at random for bmi & physical activity (baseline and follow up)
+- increased missing at older ages
+```{r}
+plots <- u1_missingness_plots(u1_df, "u1_at_anthro_bmi_eig", 0.75)
+(plots$age | plots$sex | plots$uort | plots$lung2 | plots$lung1) /
+plot_spacer() / 
+plot_spacer()
+
+plots <- u2_missingness_plots(u2_df_asthma, "u2_at_anthro_bmi_eig", 0.75)
+(plots$age | plots$sex | plots$uort | plots$lung2 | plots$lung1) /
+plot_spacer() / 
+plot_spacer()
+
+plots <- u1_missingness_plots(u1_df, "u1_at_gpaq_ptotal_quartile", 0.65)
+(plots$age | plots$sex | plots$uort | plots$lung2 | plots$lung1) /
+plot_spacer() / 
+plot_spacer()
+
+plots <- u2_missingness_plots(u2_df_asthma, "u2_at_gpaq_ptotal_quartile", 0.65)
+(plots$age | plots$sex | plots$uort | plots$lung2 | plots$lung1) /
+plot_spacer() / 
+plot_spacer()
+
+```
+
+looking for missing at random for migration, smoking, education, income, occupational exposure, neighborhood income, ndvi, population density, degree of urbanization (only baseline)
+- also some evidence of increased missing at older ages
+- 100% missing for Leipzig in 2015 -> use 2018 for all
+```{r}
+# 1
+plots_mig <- u1_missingness_plots(u1_df, "u1_at_ses_mig_status", 0.9)
+(plots_mig$age | plots_mig$sex | plots_mig$uort | plots_mig$lung2 | plots_mig$lung1) /
+  plot_spacer() / plot_spacer()
+
+# 2
+plots_smok <- u1_missingness_plots(u1_df, "u1_at_smok_stat_noint", 0.7)
+(plots_smok$age | plots_smok$sex | plots_smok$uort | plots_smok$lung2 | plots_smok$lung1) /
+  plot_spacer() / plot_spacer()
+
+# 3
+plots_isced <- u1_missingness_plots(u1_df, "u1_at_ses_isced11_level", 0.9)
+(plots_isced$age | plots_isced$sex | plots_isced$uort | plots_isced$lung2 | plots_isced$lung1) /
+  plot_spacer() / plot_spacer()
+
+# 4
+plots_inc <- u1_missingness_plots(u1_df, "u1_at_ses_inc", 0.75)
+(plots_inc$age | plots_inc$sex | plots_inc$uort | plots_inc$lung2 | plots_inc$lung1) /
+  plot_spacer() / plot_spacer()
+
+# 5
+plots_bb1 <- u1_missingness_plots(u1_df, "u1_d_bb1", 0.15)
+(plots_bb1$age | plots_bb1$sex | plots_bb1$uort | plots_bb1$lung2 | plots_bb1$lung1) /
+  plot_spacer() / plot_spacer()
+
+# 6
+plots_hhinc <- u1_missingness_plots(u1_df, "u1_gt_inc_hh_ink_d", 0.75)
+(plots_hhinc$age | plots_hhinc$sex | plots_hhinc$uort | plots_hhinc$lung2 | plots_hhinc$lung1) /
+  plot_spacer() / plot_spacer()
+
+# 7
+plots_gisd <- u1_missingness_plots(u1_df, "u1_gt_gisd_rki_m", 0.75)
+(plots_gisd$age | plots_gisd$sex | plots_gisd$uort | plots_gisd$lung2 | plots_gisd$lung1) /
+  plot_spacer() / plot_spacer()
+
+# 8
+plots_dgu <- u1_missingness_plots(u1_df, "u1_gt_dgu_eu_m", 0.75)
+(plots_dgu$age | plots_dgu$sex | plots_dgu$uort | plots_dgu$lung2 | plots_dgu$lung1) /
+  plot_spacer() / plot_spacer()
+
+# 9
+plots_pop <- u1_missingness_plots(u1_df, "u1_gt_pop_d_ink_a_18", 0.25)
+(plots_pop$age | plots_pop$sex | plots_pop$uort | plots_pop$lung2 | plots_pop$lung1) /
+  plot_spacer() / plot_spacer()
+
+# 10
+plots_ndvi <- u1_missingness_plots(u1_df, "u1_gt_ndvi_300_exp_g_15", 0.75)
+(plots_ndvi$age | plots_ndvi$sex | plots_ndvi$uort | plots_ndvi$lung2 | plots_ndvi$lung1) /
+  plot_spacer() / plot_spacer()
+```
+
+
+
+
+#3. Prepare dataset for imputation
+
+exclude variables related to the outcomes of interest--we do not want to impute these
+- Dad asthma history
+- Mom asthma history
+- Residential history
+- COPD medication
+- Asthma medication
+- Age of asthma diagnosis
+- Age of COPD diagnosis
+
+exlcude other variables that will slow down the algorithm and not important predictors
+- id
+- exam date
+- income categories (we can calculate these after if we impute income)
+- physical activity (we only want the transformed categorical variable)
+```{r}
+exclude_vars_u1 <- c("ID", "u1_basist_udat", "u1_basist_year", "u1_dt_fa_v3_ab", "u1_dt_fa_m3_ab", "u1_d_umw2_j", "u1_at_lun_age_asth", "u1_at_lun_age_copd", "u1_dt_an_lungasth2", "u1_dt_an_lungcopd2", "u1_dt_lg2_2", "u1t_l388lq_medic4", "u1_at_ses_inc_categories", "u1_at_ses_inc_poverty", "u1_at_ses_inc_median", "u1_at_ses_isced11_3level", "u1_d_an_lung_2", "u1_d_an_lung_1")
+exclude_vars_u2 <- c("u2_basist_udat", "u2_basist_year", "u2_dt_fa_v3_ab", "u2_dt_fa_m3_ab",  "u2_d_umw2_j", "u2_at_lun_age_asth","u2_at_lun_age_copd","u2_dt_an_lungasth2_fu", "u2_dt_an_lung_2_fu", "u2_dt_an_lung_1_fu")
+
+u2_df_asthma_imputation <- u2_df_asthma %>%
+  select(-all_of(c(exclude_vars_u1, exclude_vars_u2)))
+
+u2_df_copd_imputation <- u2_df_copd %>%
+  select(-all_of(c(exclude_vars_u1, exclude_vars_u2)))
+```
+
+confirm that the exclusion works corrrectly
+```{r}
+missing_table_df <- data.frame(
+  variable = names(u1_df_imputation),
+  missing_count = sapply(u1_df_imputation, function(x) sum(is.na(x)))
+)
+
+missing_table_df
+
+missing_table_df2 <- data.frame(
+  variable = names(u2_df_asthma_imputation),
+  missing_count = sapply(u2_df_asthma_imputation, function(x) sum(is.na(x)))
+)
+
+missing_table_df2
+```
+
+check that all categorical variables are factors
+```{r}
+u2_df_asthma_imputation %>%
+  summarise(across(everything(), ~ class(.x))) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "datatype")
+```
+
+
+#4. Imputation of follow-up dataset: Asthma
+
+```{r}
+no_cores <- detectCores() - 2     #leave 2 cores left  
+cl <- makeCluster(no_cores)  
+registerDoParallel(cl)
+
+set.seed(809)   # reproducibility
+
+mf_result_100_fu_asthma <- missForest(
+  u2_df_asthma_imputation,
+  maxiter = 10,        # default iterations
+  ntree = 100,         # default RF size
+  variablewise = TRUE, # gives per-variable error
+  verbose = TRUE,       # print progress
+  parallelize = "forests"
+)
+
+# Extract the imputed dataset
+imputed_100_fu_asthma <- mf_result_100_fu_asthma$ximp
+
+# Inspect OOB error
+mf_result_100_fu_asthma$OOBerror
+```
+
+checking accuracy of the imputed variables using OOB error
+```{r}
+imp100_result_asthma <- data.frame(
+  variable = names(u2_df_asthma_imputation),
+  missing = colSums(is.na(u2_df_asthma_imputation)),
+  OOB_error = mf_result_100_fu_asthma$OOBerror
+)[order(-mf_result_100_fu_asthma$OOBerror), ]
+
+imp100_result_asthma$OOB_error <- round(imp100_result_asthma$OOB_error, 3)
+```
+
+add the excluded columns back in and save
+```{r}
+# Extract excluded variables BEFORE imputation
+excluded_part <- u2_df_asthma %>% select(any_of(c(exclude_vars_u1, exclude_vars_u2)))
+
+# Add excluded variables back AFTER imputation
+u2_df_asthma_final <- bind_cols(
+  imputed_100_fu_asthma,
+  excluded_part
+)
+```
+
+```{r}
+saveRDS(u2_df_asthma_final,file = "")
+```
+
+#5 Imputation of follow-up dataset: COPD
+
+```{r}
+no_cores <- detectCores() - 2     #leave 2 cores left  
+cl <- makeCluster(no_cores)  
+registerDoParallel(cl)
+
+set.seed(809)   # reproducibility
+
+mf_result_100_fu_copd<- missForest(
+  u2_df_copd_imputation,
+  maxiter = 10,        # default iterations
+  ntree = 100,         # default RF size
+  variablewise = TRUE, # gives per-variable error
+  verbose = TRUE,       # print progress
+  parallelize = "forests"
+)
+
+# Extract the imputed dataset
+imputed_100_fu_copd <- mf_result_100_fu_copd$ximp
+
+# Inspect OOB error
+mf_result_100_fu_copd$OOBerror
+```
+
+checking accuracy of the imputed variables using OOB
+```{r}
+imp100_result_copd <- data.frame(
+  variable = names(u2_df_copd_imputation),
+  missing = colSums(is.na(u2_df_copd_imputation)),
+  OOB_error = mf_result_100_fu_copd$OOBerror
+)[order(-mf_result_100_fu_copd$OOBerror), ]
+
+imp100_result_copd$OOB_error <- round(imp100_result_copd$OOB_error, 3)
+```
+
+add the excluded columns back in and save
+```{r}
+# Extract excluded variables BEFORE imputation
+excluded_part <- u2_df_copd %>% select(any_of(c(exclude_vars_u1, exclude_vars_u2)))
+
+# Add excluded variables back AFTER imputation
+u2_df_copd_final <- bind_cols(
+  imputed_100_fu_copd,
+  excluded_part
+)
+```
+
+```{r}
+saveRDS(u2_df_copd_final,file="")
+```
+
+
+#6 Testing with more random forests
+- 500 forests runtime about 3 hours
+- did not increase the accuracy meaningfully
+```{r}
+X2 <- u1_df_imputation
+```
+
+```{r}
+no_cores <- detectCores() - 2     #leave 2 cores left  
+cl <- makeCluster(no_cores)  
+registerDoParallel(cl)
+
+set.seed(809)   # reproducibility
+
+mf_result <- missForest(
+  X2,
+  maxiter = 10,        # default iterations
+  ntree = 500,         # default RF size
+  variablewise = TRUE, # gives per-variable error
+  verbose = TRUE,       # print progress
+  parallelize = "forests"
+)
+
+# Extract the imputed dataset
+X2_imputed <- mf_result$ximp
+
+# Inspect OOB error
+mf_result$OOBerror
+
+# save
+write.csv(X2_imputed, "", row.names = FALSE)
+```
+
+compare results
+```{r}
+# Create tables (do NOT print yet)
+desc_cc  <- CreateTableOne(vars = names(X), data = X)
+desc_imp100 <- CreateTableOne(vars = names(X_imputed), data = X_imputed)
+desc_imp500 <- CreateTableOne(vars = names(X2_imputed), data = X2_imputed)
+
+# Convert to data frames
+df_cc  <- print(desc_cc,  printToggle = FALSE, noSpaces = TRUE)
+df_imp100 <- print(desc_imp100, printToggle = FALSE, noSpaces = TRUE)
+df_imp500 <- print(desc_imp500, printToggle = FALSE, noSpaces = TRUE)
+
+# Combine into one data frame
+desc <- data.frame(
+  Variable = rownames(df_cc),
+  Complete_case = df_cc[, 1],
+  Imputed_DS_100 = df_imp[, 1],
+  Imputed_DS_500 = df_imp[, 1],
+  row.names = NULL
+)
+
+desc
+```
+
+checking accuracy of the imputed variables
+```{r}
+imp500_result <- data.frame(
+  variable = names(X),
+  missing = colSums(is.na(X)),
+  OOB_error = mf_result$OOBerror
+)[order(-mf_result$OOBerror), ]
+
+imp500_result$OOB_error <- round(imp500_result$OOB_error, 3)
+```
+
+
+
+

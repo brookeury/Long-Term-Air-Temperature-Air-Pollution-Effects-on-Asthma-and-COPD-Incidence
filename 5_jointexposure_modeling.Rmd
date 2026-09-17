@@ -1,0 +1,422 @@
+
+This file contains the code to run joint exposure models (weighted quantile sum)
+
+```{r}
+library(dplyr)
+library(mgcv)
+library(purrr)
+library(tibble)
+library(patchwork)
+library(ggplot2)
+library(future)
+library(future.apply)
+library(gWQS)
+library(ggsci)
+library(cowplot)
+library(scales)
+```
+
+
+# Load data
+```{r}
+#main datasets
+u2_df_asthma <- readRDS("") #5-year follow-up df, excluding those with asthma at baseline
+u2_df_copd   <- readRDS("") #5-year follow-up df, excluding those with COPD at baseline
+```
+
+
+# Setting up variables
+
+setting up to run code in parallel
+```{r}
+plan(
+  multisession,
+  workers = max(1, parallel::detectCores() - 1)
+)
+
+options(future.globals.maxSize = 8 * 1024^3)
+```
+
+setting up scenarios--one for COPD, one for asthma
+```{r}
+scenarios <- list(
+  copd_incidence = list(df = u2_df_copd, outcome = "u2_dt_an_lung_1_fu", title = "COPD Incidence"),
+  asthma_incidence = list(df = u2_df_asthma, outcome = "u2_dt_an_lung_2_fu", title = "Asthma Incidence")
+)
+```
+
+setting up variables
+```{r}
+temp_var <- "u1_gt_t_mean_hmg_g"
+winter_var <- "u1_gt_t_win_mean_hmg_g"
+temp_vars <- c("u1_gt_t_mean_hmg_g", "u1_gt_t_win_mean_hmg_g", "u1_gt_t_spr_mean_hmg_g")
+seasons_order <- c("u1_gt_t_fal_mean_hmg_g", "u1_gt_t_win_mean_hmg_g", "u1_gt_t_spr_mean_hmg_g", "u1_gt_t_smr_mean_hmg_g")
+humidity_var <- "u1_gt_rh_mean_hmg_g"
+
+pm_vars <- c("u1_gt_pm25_exp_g", "u1_gt_pm10_exp_g")
+no2_var <-"u1_gt_no2_exp_g"
+pollutant_vars <- c(pm_vars, no2_var)
+
+all_vars <- c(temp_var, "u1_gt_t_win_mean_hmg_g", "u1_gt_t_spr_mean_hmg_g", pollutant_vars)
+
+study_center_var <-"u1_basist_uort_combined"
+covars <- c(
+  "u1_basist_sex",
+  "u1_basist_age",
+  "u1_at_ses_mig_status",
+  "u1_at_smok_stat_noint",
+  "u1_at_ses_isced11_3level",
+  "u1_gt_gisd_rki_m",
+  "u1_gt_pop_d_ink_a_18")
+
+labels <- c(
+  "u1_gt_t_mean_hmg_g" = "Annual Temperature (°C)",
+  "u1_gt_t_win_mean_hmg_g" = "Winter Temperature (°C)",
+  "u1_gt_t_smr_mean_hmg_g" = "Summer Temperature (°C)",
+  "u1_gt_t_fal_mean_hmg_g" = "Fall Temperature (°C)",
+  "u1_gt_t_spr_mean_hmg_g" = "Spring Temperature (°C)",
+  "u1_gt_pm25_exp_g"   = "PM2.5 (µg/m³)",
+  "u1_gt_pm10_exp_g"   = "PM10 (µg/m³)",
+  "u1_gt_no2_exp_g"    = "NO2 (µg/m³)",
+  "u1_gt_gisd_rki_m" = "GISD",
+  "u1_gt_rh_mean_hmg_g" = "Relative Humidity"
+)
+
+titles <- c(
+  "u1_gt_t_mean_hmg_g" = "Annual Temperature",
+  "u1_gt_t_win_mean_hmg_g" = "Winter Temperature",
+  "u1_gt_t_smr_mean_hmg_g" = "Summer Temperature",
+  "u1_gt_t_fal_mean_hmg_g" = "Fall Temperature",
+  "u1_gt_t_spr_mean_hmg_g" = "Spring Temperature",
+  "u1_gt_pm25_exp_g"   = "PM2.5",
+  "u1_gt_pm10_exp_g"   = "PM10",
+  "u1_gt_no2_exp_g"    = "NO2",
+  "u1_gt_gisd_rki_m" = "GISD",
+  "u1_gt_rh_mean_hmg_g" = "Relative Humidity"
+)
+```
+
+
+
+# grouped weighted quantile sum regression
+- For Figure 2 and Table S3
+
+variables
+- note that the gwas does not allow a random intercept so we include the study center as a covariate
+```{r}
+covars_gwas <- c(
+  "u1_basist_sex",
+  "u1_basist_age",
+  "u1_at_ses_mig_status",
+  "u1_at_smok_stat_noint",
+  "u1_at_ses_isced11_3level",
+  "u1_gt_gisd_rki_m",
+  "u1_gt_pop_d_ink_a_18",
+  "u1_basist_uort_combined")
+```
+
+
+#1 COPD (winter temperature)
+```{r}
+wqs_vars <- c(
+  "u1_gt_t_win_mean_hmg_g",
+  pm_vars,
+  no2_var
+)
+```
+
+```{r}
+df           = u2_df_copd
+outcome      = "u2_dt_an_lung_1_fu"
+
+df$outcome_bin <- as.integer(df[[outcome]] == 1)
+
+# Keep only needed columns
+wqs_df <- df[, c("outcome_bin", wqs_vars, covars_gwas)]
+```
+
+run model
+```{r}
+fit_wqs_copd <- gwqs(
+  formula = outcome_bin ~ wqs + 
+    u1_basist_sex +
+    u1_basist_age +
+    u1_at_ses_mig_status +
+    u1_at_smok_stat_noint +
+    u1_at_ses_isced11_3level +
+    u1_gt_gisd_rki_m +
+    u1_gt_pop_d_ink_a_18 +
+    u1_basist_uort_combined,
+  mix_name = wqs_vars,
+  data = wqs_df,
+  q = 10,
+  validation = 0.6,
+  b = 100,
+  family = "binomial",
+  seed = 809,
+  tables = TRUE
+)
+```
+
+
+get the weights for each environmental variable
+```{r}
+fit_wqs_copd$final_weights
+```
+
+convert results to IQR scale
+```{r}
+# coefficient table
+coef_tab <- summary(fit_wqs_copd$fit)$coefficients
+
+# extract WQS term
+beta <- coef_tab["wqs", "Estimate"]
+se   <- coef_tab["wqs", "Std. Error"]
+
+# IQR of observed WQS index
+iqr_wqs <- IQR(fit_wqs_copd$fit$model$wqs, na.rm = TRUE)
+
+# inference
+z_val   <- beta / se
+p_value <- 2 * (1 - pnorm(abs(z_val)))
+z_crit  <- qnorm(0.975)
+
+# OR per IQR increase in the WQS index
+mixture_effect_copd <- tibble::tibble(
+  exposure = "mixture",
+  IQR_WQS  = iqr_wqs,
+  OR       = exp(beta * iqr_wqs),
+  CI_low   = exp((beta - z_crit * se) * iqr_wqs),
+  CI_high  = exp((beta + z_crit * se) * iqr_wqs),
+  p_value  = p_value,
+  OR_CI    = sprintf(
+    "%.3f (%.3f, %.3f)",
+    exp(beta * iqr_wqs),
+    exp((beta - z_crit * se) * iqr_wqs),
+    exp((beta + z_crit * se) * iqr_wqs)
+  )
+)
+
+mixture_effect_copd
+```
+
+
+#2 Asthma (inverse winter temperature)
+
+inverse of winter temp
+```{r}
+u2_df_asthma$inv_u1_gt_t_win_mean_hmg_g <- -u2_df_asthma$u1_gt_t_win_mean_hmg_g
+```
+
+```{r}
+wqs_vars <- c(
+  pm_vars,
+  no2_var,
+  "inv_u1_gt_t_win_mean_hmg_g"
+)
+```
+
+```{r}
+df           = u2_df_asthma
+outcome      = "u2_dt_an_lung_2_fu"
+
+df$outcome_bin <- as.integer(df[[outcome]] == 1)
+
+# Keep only needed columns
+wqs_df <- df[, c("outcome_bin", wqs_vars, covars_gwas)]
+```
+
+run model
+```{r}
+fit_wqs_asthma <- gwqs(
+  formula = outcome_bin ~ wqs + 
+    u1_basist_sex +
+    u1_basist_age +
+    u1_at_ses_mig_status +
+    u1_at_smok_stat_noint +
+    u1_at_ses_isced11_3level +
+    u1_gt_gisd_rki_m +
+    u1_gt_pop_d_ink_a_18 +
+    u1_basist_uort_combined,
+  mix_name = wqs_vars,
+  data = wqs_df,
+  q = 10,
+  validation = 0.6,
+  b = 100,
+  family = "binomial",
+  seed = 809,
+  tables = TRUE
+)
+```
+
+weights
+```{r}
+fit_wqs_asthma$final_weights
+```
+
+convert results to IQR scale
+```{r}
+# coefficient table
+coef_tab <- summary(fit_wqs_asthma$fit)$coefficients
+
+# extract WQS term
+beta <- coef_tab["wqs", "Estimate"]
+se   <- coef_tab["wqs", "Std. Error"]
+
+# IQR of observed WQS index
+iqr_wqs <- IQR(fit_wqs_asthma$fit$model$wqs, na.rm = TRUE)  #can switch this to 5
+#iqr_wqs <- 5
+
+# inference
+z_val   <- beta / se
+p_value <- 2 * (1 - pnorm(abs(z_val)))
+z_crit  <- qnorm(0.975)
+
+# OR per IQR increase in the WQS index
+mixture_effect_asthma <- tibble::tibble(
+  exposure = "mixture",
+  IQR_WQS  = iqr_wqs,
+  OR       = exp(beta * iqr_wqs),
+  CI_low   = exp((beta - z_crit * se) * iqr_wqs),
+  CI_high  = exp((beta + z_crit * se) * iqr_wqs),
+  p_value  = p_value,
+  OR_CI    = sprintf(
+    "%.3f (%.3f, %.3f)",
+    exp(beta * iqr_wqs),
+    exp((beta - z_crit * se) * iqr_wqs),
+    exp((beta + z_crit * se) * iqr_wqs)
+  )
+)
+
+mixture_effect_asthma
+```
+
+
+#3 create WQS plots
+```{r}
+titles <- c(
+  "inv_u1_gt_t_win_mean_hmg_g" = "Inverse Winter\nTemperature",
+  "u1_gt_t_win_mean_hmg_g" = "Winter\nTemperature",
+  "u1_gt_pm25_exp_g"   = "PM2.5",
+  "u1_gt_pm10_exp_g"   = "PM10",
+  "u1_gt_no2_exp_g"    = "NO2"
+)
+```
+
+```{r}
+p1 <- ggplot(mixture_effect_asthma, aes(x = exposure, y = OR)) +
+  geom_point(size = 2, color = "black") +
+  geom_errorbar(
+    aes(ymin = CI_low, ymax = CI_high),
+    width = 0.18,
+    color = "black",
+    linewidth = 1 
+  ) +
+  scale_y_continuous(limits = c(0.94, 1.6)) +
+  geom_hline(yintercept = 1, linetype = "dashed") +
+  labs(
+    x = "",
+    y = "Odds Ratio"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.title.x = element_blank(),
+    text = element_text(size = 15),       
+    axis.title = element_text(size = 13),
+    axis.text = element_text(size = 13),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    axis.line.y = element_line(color = "gray50", linewidth = 0.5),
+    axis.line.x = element_line(color = "gray50", linewidth = 0.5)
+  )
+
+p2 <- ggplot(mixture_effect_copd, aes(x = exposure, y = OR)) +
+  geom_point(size = 2, color = "black") +
+  geom_errorbar(
+    aes(ymin = CI_low, ymax = CI_high),
+    width = 0.18,
+    color = "black",
+    linewidth = 1 
+  ) +
+  scale_y_continuous(limits = c(0.94, 1.6)) +
+  geom_hline(yintercept = 1, linetype = "dashed") +
+  labs(
+    x = "",
+    y = "Odds Ratio"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.title.x = element_blank(),
+    text = element_text(size = 15),         
+    axis.title = element_text(size = 13),
+    axis.text = element_text(size = 13),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    axis.line.y = element_line(color = "gray50", linewidth = 0.5),
+    axis.line.x = element_line(color = "gray50", linewidth = 0.5)
+  )
+
+
+# convert weights to dataframe
+weights_df <- as.data.frame(fit_wqs_asthma$final_weights)
+colnames(weights_df) <- c("component", "weight")
+weights_df <- weights_df %>%
+  arrange(desc(weight))
+p3 <- ggplot(weights_df, aes(x = reorder(component, weight), y = weight)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  scale_x_discrete(labels = titles) + 
+  labs(
+    x = "",
+    y = "Weight"
+  ) +
+  theme_minimal() +
+  theme(
+    text = element_text(size = 15),       
+    axis.title = element_text(size = 13),
+    axis.text = element_text(size = 13),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    axis.line.y = element_line(color = "gray50", linewidth = 0.5),
+    axis.line.x = element_line(color = "gray50", linewidth = 0.5)
+  )
+
+weights_df <- as.data.frame(fit_wqs_copd$final_weights)
+colnames(weights_df) <- c("component", "weight")
+weights_df <- weights_df %>%
+  arrange(desc(weight))
+p4 <- ggplot(weights_df, aes(x = reorder(component, weight), y = weight)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  scale_x_discrete(labels = titles) + 
+  labs(
+    x = "",
+    y = "Weight"
+  ) +
+  theme_minimal() +
+  theme(
+    text = element_text(size = 15),      
+    axis.title = element_text(size = 13),
+    axis.text = element_text(size = 13),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    axis.line.y = element_line(color = "gray50", linewidth = 0.5),
+    axis.line.x = element_line(color = "gray50", linewidth = 0.5)
+  )
+
+
+top <- plot_grid(p1, p3, p3, ncol = 3, rel_widths = c(0.6, 0.9, 0.5))
+bottom <- plot_grid(p2, p4, p4, ncol = 3, rel_widths = c(0.6, 0.9, 0.5))
+
+final_plot <- plot_grid(top, bottom, ncol = 1)
+final_plot
+
+#save as PNG
+ggsave(
+  "",
+  plot = final_plot,
+  width = 10,
+  height = 6,
+  dpi = 1200
+)
+```

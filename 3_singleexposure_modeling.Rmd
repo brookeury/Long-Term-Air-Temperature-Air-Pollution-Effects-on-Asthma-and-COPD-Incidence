@@ -1,0 +1,642 @@
+
+This file contains the code to run single-exposure models (GAMMs and logistic regression)
+
+```{r}
+library(dplyr)
+library(mgcv)
+library(purrr)
+library(tibble)
+library(patchwork)
+library(ggplot2)
+library(future)
+library(future.apply)
+library(gWQS)
+library(ggsci)
+library(cowplot)
+library(scales)
+```
+
+
+# Load data
+```{r}
+#main datasets
+u2_df_asthma <- readRDS("") #5-year follow-up df, excluding those with asthma at baseline
+u2_df_copd   <- readRDS("") #5-year follow-up df, excluding those with COPD at baseline
+```
+
+
+# Setting up variables
+
+setting up to run code in parallel
+```{r}
+plan(
+  multisession,
+  workers = max(1, parallel::detectCores() - 1)
+)
+
+options(future.globals.maxSize = 8 * 1024^3)
+```
+
+setting up scenarios--one for COPD, one for asthma
+```{r}
+scenarios <- list(
+  copd_incidence = list(df = u2_df_copd, outcome = "u2_dt_an_lung_1_fu", title = "COPD Incidence"),
+  asthma_incidence = list(df = u2_df_asthma, outcome = "u2_dt_an_lung_2_fu", title = "Asthma Incidence")
+)
+```
+
+setting up variables
+```{r}
+temp_var <- "u1_gt_t_mean_hmg_g"
+winter_var <- "u1_gt_t_win_mean_hmg_g"
+temp_vars <- c("u1_gt_t_mean_hmg_g", "u1_gt_t_win_mean_hmg_g", "u1_gt_t_spr_mean_hmg_g")
+seasons_order <- c("u1_gt_t_fal_mean_hmg_g", "u1_gt_t_win_mean_hmg_g", "u1_gt_t_spr_mean_hmg_g", "u1_gt_t_smr_mean_hmg_g")
+humidity_var <- "u1_gt_rh_mean_hmg_g"
+
+pm_vars <- c("u1_gt_pm25_exp_g", "u1_gt_pm10_exp_g")
+no2_var <-"u1_gt_no2_exp_g"
+pollutant_vars <- c(pm_vars, no2_var)
+
+all_vars <- c(temp_var, "u1_gt_t_win_mean_hmg_g", "u1_gt_t_spr_mean_hmg_g", pollutant_vars)
+
+study_center_var <-"u1_basist_uort_combined"
+covars <- c(
+  "u1_basist_sex",
+  "u1_basist_age",
+  "u1_at_ses_mig_status",
+  "u1_at_smok_stat_noint",
+  "u1_at_ses_isced11_3level",
+  "u1_gt_gisd_rki_m",
+  "u1_gt_pop_d_ink_a_18")
+
+labels <- c(
+  "u1_gt_t_mean_hmg_g" = "Annual Temperature (°C)",
+  "u1_gt_t_win_mean_hmg_g" = "Winter Temperature (°C)",
+  "u1_gt_t_smr_mean_hmg_g" = "Summer Temperature (°C)",
+  "u1_gt_t_fal_mean_hmg_g" = "Fall Temperature (°C)",
+  "u1_gt_t_spr_mean_hmg_g" = "Spring Temperature (°C)",
+  "u1_gt_pm25_exp_g"   = "PM2.5 (µg/m³)",
+  "u1_gt_pm10_exp_g"   = "PM10 (µg/m³)",
+  "u1_gt_no2_exp_g"    = "NO2 (µg/m³)",
+  "u1_gt_gisd_rki_m" = "GISD",
+  "u1_gt_rh_mean_hmg_g" = "Relative Humidity"
+)
+
+titles <- c(
+  "u1_gt_t_mean_hmg_g" = "Annual Temperature",
+  "u1_gt_t_win_mean_hmg_g" = "Winter Temperature",
+  "u1_gt_t_smr_mean_hmg_g" = "Summer Temperature",
+  "u1_gt_t_fal_mean_hmg_g" = "Fall Temperature",
+  "u1_gt_t_spr_mean_hmg_g" = "Spring Temperature",
+  "u1_gt_pm25_exp_g"   = "PM2.5",
+  "u1_gt_pm10_exp_g"   = "PM10",
+  "u1_gt_no2_exp_g"    = "NO2",
+  "u1_gt_gisd_rki_m" = "GISD",
+  "u1_gt_rh_mean_hmg_g" = "Relative Humidity"
+)
+```
+
+
+
+
+#1. GAMMS with non-linear terms for environmental data
+- For Figure 1 and Figure S5
+
+variable set up -- temp & seasons
+```{r}
+all_vars <- c(temp_var, "u1_gt_t_win_mean_hmg_g", "u1_gt_t_spr_mean_hmg_g", pollutant_vars)
+```
+
+variable set up -- all temperature seasons
+```{r}
+all_vars <- c(temp_var, seasons_order)
+```
+
+function -- final version
+```{r}
+fit_gamm <- function(
+    y,  data,
+    x,
+    label,
+    title,
+    covars,
+    study_center_random_int = FALSE
+) {
+  
+  #ensure study center is factor (for random intercept)
+  if (study_center_random_int) {
+    data[[study_center_var]] <- factor(data[[study_center_var]])
+  }
+  
+  #build formula
+  covar_string <- paste(covars, collapse = " + ")
+  
+  re_term <- if (study_center_random_int) {
+    paste0(" + s(", study_center_var, ", bs = 're')")
+  } else {
+    ""
+  }
+  
+  form <- as.formula(
+    paste0(
+      y,
+      " ~ s(", x, ", k=4) + ",
+      covar_string,
+      re_term
+    )
+  )
+  
+  #fit GAM
+  fit <- mgcv::gam(
+    formula = form,
+    data    = data,
+    family  = binomial(link = "logit"),
+    method  = "REML"
+  )
+  
+  #prediction grid 
+  xseq <- seq(
+    min(data[[x]], na.rm = TRUE),
+    max(data[[x]], na.rm = TRUE),
+    length.out = 200
+  )
+  
+  newd <- data.frame(exposure_value = xseq)
+  names(newd)[1] <- x
+  
+  #set covariates to median / mode
+  for (v in covars) {
+    if (is.numeric(data[[v]])) {
+      newd[[v]] <- median(data[[v]], na.rm = TRUE)
+    } else {
+      mode_val <- names(sort(table(data[[v]]), decreasing = TRUE))[1]
+      newd[[v]] <- factor(mode_val, levels = levels(data[[v]]))
+    }
+  }
+  
+  if (study_center_random_int) {
+    newd[[study_center_var]] <- levels(data[[study_center_var]])[1]
+  }
+  
+  #predict on log-odds scale
+  pred <- predict(
+    fit,
+    newdata = newd,
+    se.fit  = TRUE,
+    type    = "link",
+    exclude = if (study_center_random_int)
+      paste0("s(", study_center_var, ")")
+    else
+      NULL
+  )
+  
+  #reference = 1st percentile
+  ref_val <- stats::quantile(data[[x]], 0.01, na.rm = TRUE)
+  ref_idx <- which.min(abs(xseq - ref_val))
+  
+  #return odds ratios
+  return(list(
+    preds = tibble::tibble(
+      exposure_value = xseq,
+      OR      = exp(pred$fit - pred$fit[ref_idx]),
+      OR_low  = exp((pred$fit - 1.96 * pred$se.fit) - pred$fit[ref_idx]),
+      OR_high = exp((pred$fit + 1.96 * pred$se.fit) - pred$fit[ref_idx]),
+      exposure = x,
+      label    = label,
+      title = title
+    ),
+    fit = fit
+  ))
+}
+```
+
+function to loop through all environmental variables
+- 1st-99th percentiles
+- standardizing y-axis
+- with histogram
+```{r}
+gamm_singleexposure_outputs <- lapply(
+  scenarios,
+  function(s) {
+    
+    plotdata_list <- future.apply::future_lapply(
+      all_vars,
+      function(x) {
+        fit_gamm(
+          data  = s$df,
+          y     = s$outcome,
+          x     = x,
+          label = if (x %in% names(labels)) labels[[x]] else x,
+          title = if (x %in% names(titles)) titles[[x]] else x,
+          covars = covars,
+          study_center_random_int = TRUE
+        )
+      },
+      future.seed = TRUE
+    )
+    
+    names(plotdata_list) <- sapply(
+      all_vars,
+      function(x) {
+        if (x %in% names(labels)) labels[[x]] else x
+      }
+    )
+    
+    plots <- lapply(
+      seq_along(plotdata_list),
+      function(i) {
+        
+        df <- plotdata_list[[i]]$preds
+        
+        lab   <- df$label[1]
+        title <- df$title[1]
+        xvar  <- df$exposure[1]
+        
+        # percentiles from original data
+        p1  <- quantile(s$df[[xvar]], 0.01, na.rm = TRUE)
+        p99 <- quantile(s$df[[xvar]], 0.99, na.rm = TRUE)
+        p5  <- quantile(s$df[[xvar]], 0.05, na.rm = TRUE)
+        p95 <- quantile(s$df[[xvar]], 0.95, na.rm = TRUE)
+        
+        # restrict GAMM curve
+        df <- df %>%
+          dplyr::filter(
+            exposure_value >= p1,
+            exposure_value <= p99
+          )
+        
+        # histogram data
+        hist_df <- s$df %>%
+          dplyr::filter(
+            .data[[xvar]] >= p1,
+            .data[[xvar]] <= p99
+          )
+        
+        # GAMM plot (top panel)
+        p_gamm <- ggplot(
+          df,
+          aes(x = exposure_value, y = OR)
+        ) +
+          geom_ribbon(
+            aes(
+              ymin = OR_low,
+              ymax = OR_high
+            ),
+            fill = "grey50",
+            alpha = 0.3
+          ) +
+          geom_line(
+            linewidth = 1.1,
+            color = "black"
+          ) +
+          geom_hline(
+            yintercept = 1,
+            #linetype = "dashed",
+            color = "gray30",
+            linewidth = 0.5
+          ) +
+          geom_vline(
+            xintercept = c(p5, p95),
+            linetype = "dashed",
+            color = "gray50",
+            linewidth = 0.5
+          ) +
+          coord_cartesian(
+            xlim = c(p1, p99)
+          ) +
+          scale_y_log10(
+            limits = c(0.45, 2.8)
+          ) +
+          labs(
+            title = title,
+            x = NULL,
+            y = "Odds Ratio"
+          ) +
+          #theme_minimal(base_size = 9) +   #for all seasons plot
+          theme_minimal(base_size = 12) +
+          theme(
+            #plot.title = element_text(hjust = 0.5),
+            panel.grid.minor = element_blank(),
+            panel.grid.major = element_blank(),
+            axis.title.x = element_blank(),
+            axis.text.x = element_blank(),
+            axis.ticks.x = element_blank(),
+            plot.margin = margin(5, 5, 0, 5),
+            axis.line.y = element_line(color = "gray50", linewidth = 0.5),
+          )
+        
+        # Histogram (bottom panel)
+        p_hist <- ggplot(
+          hist_df,
+          aes(x = .data[[xvar]])
+        ) +
+          geom_histogram(
+            bins = 30,
+            fill = "grey75",
+            colour = "white",
+            linewidth = 0.2
+          ) +
+          geom_vline(
+            xintercept = c(p5, p95),
+            linetype = "dashed",
+            color = "gray50",
+            linewidth = 0.5
+          ) +
+          coord_cartesian(
+            xlim = c(p1, p99)
+          ) +
+          labs(
+            x = lab,
+            y = "Count"
+          ) +
+          #theme_minimal(base_size = 6.5) +   #for all seasons plot
+          theme_minimal(base_size = 10) +
+          theme(
+            plot.margin = margin(0, 5, 5, 5),
+            panel.grid.minor = element_blank(),
+            panel.grid.major = element_blank(),
+            axis.line.y = element_line(color = "gray50", linewidth = 0.5),
+            axis.line.x = element_line(color = "gray50", linewidth = 0.5),
+            #axis.title.y = element_text(size = 7),
+            #axis.text.y = element_text(size = 6)
+            axis.text.y  = element_blank(),
+            axis.ticks.y = element_blank(),
+            axis.title.y = element_blank()
+          )
+        
+        # Combine panels
+        p_gamm /
+          p_hist +
+          patchwork::plot_layout(
+            heights = c(9, 1)
+          )
+      }
+    )
+    
+    list(
+      plotdata_list = plotdata_list,
+      plots = plots
+    )
+  }
+)
+```
+
+
+plot
+```{r}
+scenario_boards <- lapply(names(gamm_singleexposure_outputs), function(scn_name) {
+  scn   <- gamm_singleexposure_outputs[[scn_name]]
+  plots <- scn$plots
+  
+  board <- wrap_plots(
+    plots,
+    ncol = 5,
+    nrow = 3
+  )
+  
+  board
+})
+
+names(scenario_boards) <- names(gamm_singleexposure_outputs)
+```
+
+```{r}
+scenario_boards$asthma_incidence
+scenario_boards$copd_incidence
+```
+
+
+save Figure 1
+```{r}
+ggsave(
+  "",
+  plot = scenario_boards$asthma_incidence,
+  width = 8,
+  height = 6,
+  dpi = 1200
+)
+
+ggsave(
+  "",
+  plot = scenario_boards$copd_incidence,
+  width = 8,
+  height = 6,
+  dpi = 1200
+)
+```
+
+save all seasons plot (Figure S5)
+```{r}
+ggsave(
+  "",
+  plot = scenario_boards$asthma_incidence,
+  width = 13,
+  height = 6,
+  dpi = 1200
+)
+
+ggsave(
+  "",
+  plot = scenario_boards$copd_incidence,
+  width = 13,
+  height = 6,
+  dpi = 1200
+)
+```
+
+
+
+#2 adjusted logistic regression with linear term to get ORs
+- For Table 2
+
+main function - scale factor is IQR
+```{r}
+fit_logistic_adjusted <- function(
+    df,
+    y,
+    x,
+    covars,
+    study_center_random_int = FALSE
+) {
+  
+  # choose scale factor
+  # SD
+  #sd_x <- stats::sd(df[[x]], na.rm = TRUE)
+  #scaled_name <- paste0(x, "_sd")
+  #df[[scaled_name]] <- df[[x]] / sd_x
+  
+  #IQR
+  iqr_x <- stats::IQR(df[[x]], na.rm = TRUE)
+  scaled_name <- paste0(x, "_iqr")
+  df[[scaled_name]] <- df[[x]] / iqr_x
+  
+  fixed_terms <- c(scaled_name, covars)
+  
+  
+  if (study_center_random_int) {
+    fixed_part <- paste(fixed_terms, collapse = " + ")
+    rand_part  <- paste0("(1 | ", study_center_var, ")")
+    
+    form <- as.formula(
+      paste(y, "~", fixed_part, "+", rand_part)
+    )
+    fit <- lme4::glmer(
+      form,
+      data    = df,
+      family  = binomial(),
+      control = lme4::glmerControl(
+        optimizer   = "bobyqa",
+        calc.derivs = FALSE
+      )
+    )
+    
+    summ <- summary(fit)$coefficients
+    
+  } else {
+    form <- reformulate(fixed_terms, response = y)
+    
+    fit <- glm(
+      form,
+      data   = df,
+      family = binomial()
+    )
+    
+    summ <- summary(fit)$coefficients
+  }
+  
+  beta <- summ[scaled_name, "Estimate"]
+  se   <- summ[scaled_name, "Std. Error"]
+  z    <- qnorm(0.975)
+  
+  CI_low  <- beta - z * se
+  CI_high <- beta + z * se
+  p_value <- summ[scaled_name, "Pr(>|z|)"]
+  
+  OR_val <- exp(beta)
+  CI_l   <- exp(CI_low)
+  CI_h   <- exp(CI_high)
+  
+  tibble(
+    exposure = x,
+    OR       = OR_val,
+    CI_low   = CI_l,
+    CI_high  = CI_h,
+    OR_CI    = sprintf("%.3f (%.3f, %.3f)", OR_val, CI_l, CI_h),
+    p_value  = round(p_value, 3)
+  )
+}
+```
+
+new labels
+```{r}
+titles <- c(
+  "u1_gt_t_mean_hmg_g" = "Annual\nTemperature (°C)",
+  "u1_gt_t_win_mean_hmg_g" = "Winter\nTemperature (°C)",
+  "u1_gt_t_smr_mean_hmg_g" = "Summer\nTemperature (°C)",
+  "u1_gt_t_fal_mean_hmg_g" = "Fall\nTemperature (°C)",
+  "u1_gt_t_spr_mean_hmg_g" = "Spring\nTemperature (°C)",
+  "u1_gt_pm25_exp_g"   = "PM2.5 (µg/m³)",
+  "u1_gt_pm10_exp_g"   = "PM10 (µg/m³)",
+  "u1_gt_no2_exp_g"    = "NO2 (µg/m³)"
+)
+
+labels <- c(
+  "u1_gt_t_mean_hmg_g" = "Annual\nTemperature (°C)",
+  "u1_gt_t_win_mean_hmg_g" = "Winter\nTemperature (°C)",
+  "u1_gt_t_smr_mean_hmg_g" = "Summer\nTemperature (°C)",
+  "u1_gt_t_fal_mean_hmg_g" = "Fall\nTemperature (°C)",
+  "u1_gt_t_spr_mean_hmg_g" = "Spring\nTemperature (°C)",
+  "u1_gt_pm25_exp_g"   = "PM2.5 (µg/m³)",
+  "u1_gt_pm10_exp_g"   = "PM10 (µg/m³)",
+  "u1_gt_no2_exp_g"    = "NO2 (µg/m³)"
+)
+```
+
+loop with only final covariates to create Table 2
+```{r}
+covars <- c(
+  "u1_basist_sex",
+  "u1_basist_age",
+  "u1_at_ses_mig_status",
+  "u1_at_smok_stat_noint",
+  "u1_at_ses_isced11_3level",
+  "u1_gt_gisd_rki_m",
+  "u1_gt_pop_d_ink_a_18")
+```
+
+loop
+```{r}
+adjusted_ors2 <- lapply(
+  scenarios,
+  function(s) {
+    
+    # Parallelize the model fits (main bottleneck)
+    or_table_scaled <- future.apply::future_lapply(
+      all_vars,
+      function(x) {
+        fit_logistic_adjusted(
+          df     = s$df,
+          y      = s$outcome,
+          x      = x,
+          covars = covars,
+          study_center_random_int = TRUE
+        )
+      }
+    ) |>
+      dplyr::bind_rows()
+    
+    # clean up tables for plotting
+    plot_df <- or_table_scaled |>
+      dplyr::mutate(
+        pretty = factor(labels[exposure], levels = labels[exposure])
+      )
+    
+    #plot
+    plt <- ggplot(plot_df, aes(x = pretty, y = OR)) +
+      geom_point(size = 3, color = "black") +
+      geom_errorbar(
+        aes(ymin = CI_low, ymax = CI_high),
+        width = 0.12,
+        color = "black"
+      ) +
+      geom_hline(yintercept = 1, linetype = "dashed", color = "gray40") +
+      scale_y_log10() +
+      labs(
+        title = s$title,
+        x = "",
+        y = "Odds Ratio"
+      ) +
+      theme_minimal(base_size = 16) +
+      theme(
+        axis.text.x = element_text(size = 12, angle = 45, hjust = 1),
+        axis.text.y = element_text(size = 13),
+        plot.title  = element_text(face = "bold"),
+        panel.grid.minor = element_blank(),
+        panel.grid.major = element_blank(),
+        axis.line.y = element_line(color = "gray50", linewidth = 0.5),
+        axis.line.x = element_line(color = "gray50", linewidth = 0.5)
+      )
+    
+    list(
+      or_table = or_table_scaled,
+      plot_df  = plot_df,
+      plot     = plt
+    )
+  }
+)
+```
+
+print
+```{r}
+adjusted_ors2$asthma_incidence$plot
+adjusted_ors2$copd_incidence$plot
+
+asthma_table <- adjusted_ors2$asthma_incidence$or_table
+copd_table <- adjusted_ors2$copd_incidence$or_table
+```
+
+save
+```{r}
+write.csv(asthma_table, "", row.names = FALSE)
+write.csv(copd_table,   "",   row.names = FALSE)
+```
